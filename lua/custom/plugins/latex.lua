@@ -23,6 +23,7 @@ return {
           local map = function(lhs, rhs, desc)
             vim.keymap.set('n', lhs, rhs, { buffer = ev.buf, silent = true, desc = desc })
           end
+
           map('<leader>lc', '<cmd>VimtexCompile<CR>', 'LaTeX: Compile')
           map('<leader>lv', '<cmd>VimtexView<CR>', 'LaTeX: Forward search')
           map('<leader>lf', '<cmd>VimtexView<CR>', 'LaTeX: Forward search')
@@ -204,6 +205,83 @@ return {
               return '{'
             end, { expr = true, buffer = ev.buf, desc = 'Auto-complete after \\ref{/\\cite{' })
           end
+
+          ------------------------------------------------------------------
+          -- Citations helper: run biber/bibtex (auto-detect), then recompile
+          ------------------------------------------------------------------
+          local function detect_bib_backend(buf)
+            -- Prefer explicit biblatex backend=biber; else fall back to file hints
+            local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+            for _, ln in ipairs(lines) do
+              if ln:match '\\usepackage[^}]*{biblatex}' then
+                if ln:match 'backend%s*=%s*biber' then
+                  return 'biber'
+                end
+                return 'bibtex' -- biblatex but not explicitly biber
+              end
+            end
+            -- If a .bcf exists -> biber; else default bibtex
+            if not vim.b.vimtex or not vim.b.vimtex.tex or not vim.b.vimtex.root then
+              return 'bibtex'
+            end
+            local jobname = vim.fn.fnamemodify(vim.b.vimtex.tex, ':t:r')
+            if vim.uv.fs_stat(vim.fs.joinpath(vim.b.vimtex.root, jobname .. '.bcf')) then
+              return 'biber'
+            end
+            return 'bibtex'
+          end
+
+          local function run_citations_then_build()
+            if not vim.b.vimtex or not vim.b.vimtex.root or not vim.b.vimtex.tex then
+              vim.notify('VimTeX not initialized for this buffer', vim.log.levels.WARN)
+              return
+            end
+            local backend = detect_bib_backend(0)
+            local root = vim.b.vimtex.root
+            local jobname = vim.fn.fnamemodify(vim.b.vimtex.tex, ':t:r')
+
+            -- Save first to ensure aux files are fresh
+            vim.cmd 'silent write'
+
+            local cmd = (backend == 'biber') and { 'biber', jobname } or { 'bibtex', jobname }
+            vim.notify(('Running %s…'):format(table.concat(cmd, ' ')))
+
+            vim.fn.jobstart(cmd, {
+              cwd = root,
+              stdout_buffered = true,
+              stderr_buffered = true,
+              on_stderr = function(_, data)
+                if data and #data > 0 then
+                  vim.notify(table.concat(data, '\n'), vim.log.levels.WARN)
+                end
+              end,
+              on_exit = function(_, code)
+                if code ~= 0 then
+                  vim.notify(('(%s) exited with code %d'):format(cmd[1], code), vim.log.levels.ERROR)
+                  return
+                end
+                -- Rebuild twice to resolve cross-refs
+                vim.schedule(function()
+                  vim.cmd 'VimtexCompile'
+                  vim.defer_fn(function()
+                    vim.cmd 'VimtexCompile'
+                  end, 300)
+                end)
+              end,
+            })
+          end
+
+          -- Expose a user command and keymaps
+          vim.api.nvim_create_user_command('LatexCitations', run_citations_then_build, {})
+          map('<leader>lb', run_citations_then_build, 'LaTeX: Run biber/bibtex, then build twice')
+
+          -- Quick clean + rebuild (helps after backend changes)
+          map('<leader>lC', function()
+            vim.cmd 'VimtexClean'
+            vim.defer_fn(function()
+              vim.cmd 'VimtexCompile'
+            end, 150)
+          end, 'LaTeX: Clean aux and recompile')
         end,
       })
     end,

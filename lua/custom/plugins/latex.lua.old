@@ -33,11 +33,11 @@ return {
             end, 200)
           end, 'LaTeX: Compile then forward search')
 
-          -- Use VimTeX omni completion + sane popup behavior
+          -- VimTeX omni completion + sane popup behavior
           vim.bo[ev.buf].omnifunc = 'vimtex#complete#omnifunc'
           vim.opt_local.completeopt = { 'menu', 'menuone', 'noinsert' }
 
-          -- STOP auto-reindent on "}" (esp. in display math): remove }/0} from indentkeys
+          -- Stop auto-reindent on "}" (esp. in display math)
           do
             local ik = vim.opt_local.indentkeys:get()
             local filtered = {}
@@ -80,7 +80,7 @@ return {
               },
               sources = cmp.config.sources({
                 { name = 'nvim_lsp' },
-                { name = 'omni' }, -- \begin{...}, \alpha, \cite, \ref, etc.
+                { name = 'omni' }, -- \begin{…}, \alpha, \cite, \ref, etc.
                 { name = 'luasnip' },
               }, {
                 { name = 'path' },
@@ -103,7 +103,6 @@ return {
           end
 
           vim.keymap.set('i', '}', function()
-            -- insert the literal "}" first; schedule the rest
             vim.schedule(function()
               local pos = vim.api.nvim_win_get_cursor(0) -- {row1, col0}
               local row1, col0 = pos[1], pos[2]
@@ -138,6 +137,73 @@ return {
             end)
             return '}' -- the actual typed character
           end, { expr = true, buffer = ev.buf, desc = 'TeX: mirror \\end{…} after \\begin{…}' })
+
+          ------------------------------------------------------------------
+          -- Auto-trigger completion right after "\ref{" and "\cite{…}" families
+          ------------------------------------------------------------------
+          do
+            -- label-like commands
+            local ref_like = {
+              ref = true,
+              eqref = true,
+              pageref = true,
+              nameref = true,
+              cref = true,
+              Cref = true,
+              autoref = true,
+              vref = true,
+              Vref = true,
+            }
+            -- citation-like commands (biblatex, natbib, etc.)
+            local cite_like = {
+              cite = true,
+              Cite = true,
+              nocite = true,
+              parencite = true,
+              Parencite = true,
+              textcite = true,
+              Textcite = true,
+              footcite = true,
+              Footcite = true,
+              supercite = true,
+              autocite = true,
+              Autocite = true,
+              smartcite = true,
+              Smartcite = true,
+              citet = true,
+              citep = true,
+              Citep = true,
+              Citet = true,
+              citeauthor = true,
+              Citeauthor = true,
+              citeyear = true,
+              Citeyear = true,
+              citeyearpar = true,
+              Citeyearpar = true,
+            }
+
+            vim.keymap.set('i', '{', function()
+              -- insert '{' first, then inspect context & maybe trigger completion
+              vim.schedule(function()
+                local ok2, cmp2 = pcall(require, 'cmp')
+                if not ok2 then
+                  return
+                end
+                local pos = vim.api.nvim_win_get_cursor(0) -- {row1, col0}
+                local col0 = pos[2]
+                local line = vim.api.nvim_get_current_line()
+                local before = line:sub(1, col0) -- includes the just-typed '{'
+                local cmd = before:match '\\([A-Za-z]+){$' -- command name before '{'
+                if not cmd then
+                  return
+                end
+                if ref_like[cmd] or cite_like[cmd] then
+                  cmp2.complete() -- VimTeX omni will list labels or bib keys
+                end
+              end)
+              return '{'
+            end, { expr = true, buffer = ev.buf, desc = 'Auto-complete after \\ref{/\\cite{' })
+          end
         end,
       })
     end,
