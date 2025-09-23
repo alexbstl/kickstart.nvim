@@ -6,12 +6,6 @@ return {
     init = function()
       vim.g.tex_flavor = 'latex'
       vim.g.vimtex_compiler_method = 'latexmk'
-      vim.g.vimtex_compiler_latexmk = {
-        executable = 'latexmk',
-        continuous = 1,
-        callback = 1,
-        options = { '-pdf', '-interaction=nonstopmode', '-synctex=1' },
-      }
       vim.g.vimtex_syntax_conceal_disable = 1
       vim.g.vimtex_complete_enabled = 1
 
@@ -19,7 +13,6 @@ return {
         vim.g.vimtex_view_method = 'skim'
         vim.g.vimtex_view_skim_sync = 1
         vim.g.vimtex_view_skim_activate = 1
-        vim.g.vimtex_view_automatic = 1
       else
         vim.g.vimtex_view_method = 'okular'
       end
@@ -66,7 +59,7 @@ return {
               mapping = cmp.mapping.preset.insert {
                 ['<C-x>'] = cmp.mapping.complete(),
                 ['<C-e>'] = cmp.mapping.abort(),
-                ['<CR>'] = cmp.mapping.confirm { select = true },
+                ['<CR>'] = cmp.mapping.confirm { select = true }, -- confirm only
                 ['<Tab>'] = cmp.mapping(function(fb)
                   if cmp.visible() then
                     cmp.select_next_item()
@@ -97,7 +90,11 @@ return {
             }
           end
 
-          -- Insert-mode "}" mapping → auto-add \end{env}
+          ------------------------------------------------------------------
+          -- Insert-mode "}" mapping (scheduled, deduped):
+          -- After you type '}', if line ends with \begin{env}, insert a blank
+          -- line + \end{env} below. Skips if one already exists.
+          ------------------------------------------------------------------
           local function safe_get_line(buf, idx0)
             local lc = vim.api.nvim_buf_line_count(buf)
             if idx0 < 0 or idx0 >= lc then
@@ -111,16 +108,21 @@ return {
               local pos = vim.api.nvim_win_get_cursor(0) -- {row1, col0}
               local row1, col0 = pos[1], pos[2]
               local line = vim.api.nvim_get_current_line()
+
+              -- Confirm we really just typed "}" here
               local last = line:sub(col0, col0)
               if last ~= '}' then
                 return
               end
+
+              -- Text BEFORE cursor ends with \begin{env} ?
               local before = line:sub(1, col0)
               local env = before:match '\\begin{([^}]*)}$'
               if not env or env == '' then
                 return
               end
 
+              -- Avoid duplicates: if \end{env} already in next few lines, bail
               local esc = env:gsub('([^%w])', '%%%1')
               for i = 0, 4 do
                 local nxt = safe_get_line(0, row1 + i)
@@ -129,16 +131,31 @@ return {
                 end
               end
 
+              -- Insert blank + \end{env} and place cursor on the blank line
               local indent = line:match '^(%s*)' or ''
               vim.api.nvim_buf_set_lines(0, row1, row1, false, { '', indent .. '\\end{' .. env .. '}' })
               vim.api.nvim_win_set_cursor(0, { row1 + 1, #indent })
             end)
-            return '}'
+            return '}' -- the actual typed character
           end, { expr = true, buffer = ev.buf, desc = 'TeX: mirror \\end{…} after \\begin{…}' })
 
-          -- Auto-trigger completion after \ref{ / \cite{
+          ------------------------------------------------------------------
+          -- Auto-trigger completion right after "\ref{" and "\cite{…}" families
+          ------------------------------------------------------------------
           do
-            local ref_like = { ref = true, eqref = true, pageref = true, nameref = true, cref = true, Cref = true, autoref = true, vref = true, Vref = true }
+            -- label-like commands
+            local ref_like = {
+              ref = true,
+              eqref = true,
+              pageref = true,
+              nameref = true,
+              cref = true,
+              Cref = true,
+              autoref = true,
+              vref = true,
+              Vref = true,
+            }
+            -- citation-like commands (biblatex, natbib, etc.)
             local cite_like = {
               cite = true,
               Cite = true,
@@ -165,34 +182,45 @@ return {
               citeyearpar = true,
               Citeyearpar = true,
             }
+
             vim.keymap.set('i', '{', function()
+              -- insert '{' first, then inspect context & maybe trigger completion
               vim.schedule(function()
                 local ok2, cmp2 = pcall(require, 'cmp')
                 if not ok2 then
                   return
                 end
-                local col0 = vim.api.nvim_win_get_cursor(0)[2]
-                local before = vim.api.nvim_get_current_line():sub(1, col0)
-                local cmd = before:match '\\([A-Za-z]+){$'
-                if cmd and (ref_like[cmd] or cite_like[cmd]) then
-                  cmp2.complete()
+                local pos = vim.api.nvim_win_get_cursor(0) -- {row1, col0}
+                local col0 = pos[2]
+                local line = vim.api.nvim_get_current_line()
+                local before = line:sub(1, col0) -- includes the just-typed '{'
+                local cmd = before:match '\\([A-Za-z]+){$' -- command name before '{'
+                if not cmd then
+                  return
+                end
+                if ref_like[cmd] or cite_like[cmd] then
+                  cmp2.complete() -- VimTeX omni will list labels or bib keys
                 end
               end)
               return '{'
             end, { expr = true, buffer = ev.buf, desc = 'Auto-complete after \\ref{/\\cite{' })
           end
 
-          -- Citations helper: run biber/bibtex, then rebuild twice
+          ------------------------------------------------------------------
+          -- Citations helper: run biber/bibtex (auto-detect), then recompile
+          ------------------------------------------------------------------
           local function detect_bib_backend(buf)
+            -- Prefer explicit biblatex backend=biber; else fall back to file hints
             local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
             for _, ln in ipairs(lines) do
               if ln:match '\\usepackage[^}]*{biblatex}' then
                 if ln:match 'backend%s*=%s*biber' then
                   return 'biber'
                 end
-                return 'bibtex'
+                return 'bibtex' -- biblatex but not explicitly biber
               end
             end
+            -- If a .bcf exists -> biber; else default bibtex
             if not vim.b.vimtex or not vim.b.vimtex.tex or not vim.b.vimtex.root then
               return 'bibtex'
             end
@@ -211,9 +239,13 @@ return {
             local backend = detect_bib_backend(0)
             local root = vim.b.vimtex.root
             local jobname = vim.fn.fnamemodify(vim.b.vimtex.tex, ':t:r')
+
+            -- Save first to ensure aux files are fresh
             vim.cmd 'silent write'
+
             local cmd = (backend == 'biber') and { 'biber', jobname } or { 'bibtex', jobname }
             vim.notify(('Running %s…'):format(table.concat(cmd, ' ')))
+
             vim.fn.jobstart(cmd, {
               cwd = root,
               stdout_buffered = true,
@@ -228,6 +260,7 @@ return {
                   vim.notify(('(%s) exited with code %d'):format(cmd[1], code), vim.log.levels.ERROR)
                   return
                 end
+                -- Rebuild twice to resolve cross-refs
                 vim.schedule(function()
                   vim.cmd 'VimtexCompile'
                   vim.defer_fn(function()
@@ -238,9 +271,11 @@ return {
             })
           end
 
+          -- Expose a user command and keymaps
           vim.api.nvim_create_user_command('LatexCitations', run_citations_then_build, {})
           map('<leader>lb', run_citations_then_build, 'LaTeX: Run biber/bibtex, then build twice')
 
+          -- Quick clean + rebuild (helps after backend changes)
           map('<leader>lC', function()
             vim.cmd 'VimtexClean'
             vim.defer_fn(function()
@@ -277,7 +312,7 @@ return {
     end,
   },
 
-  -- LSP: ltex-ls with cmp capabilities (you can comment this block out if Java/ltex is heavy)
+  -- LSP: ltex-ls with cmp capabilities
   {
     'neovim/nvim-lspconfig',
     dependencies = { 'hrsh7th/cmp-nvim-lsp' },
@@ -316,62 +351,6 @@ return {
           vim.keymap.set('n', '<C-@>', '<Cmd>Neotree toggle<CR>', { silent = true })
         end,
       })
-    end,
-  },
-
-  ---------------------------------------------------------------------------
-  -- Treesitter: keep TS globally, but *disable for LaTeX/BibTeX* and enable
-  -- classic Vim regex highlighting for those filetypes via VimTeX.
-  ---------------------------------------------------------------------------
-  {
-    'nvim-treesitter/nvim-treesitter',
-    opts = function(_, opts)
-      opts = opts or {}
-      opts.highlight = opts.highlight or {}
-      opts.indent = opts.indent or {}
-
-      -- disable TS highlighting/indent for latex & bibtex
-      local disable_list = {}
-      for _, v in ipairs(opts.highlight.disable or {}) do
-        disable_list[#disable_list + 1] = v
-      end
-      if not vim.tbl_contains(disable_list, 'latex') then
-        disable_list[#disable_list + 1] = 'latex'
-      end
-      if not vim.tbl_contains(disable_list, 'bibtex') then
-        disable_list[#disable_list + 1] = 'bibtex'
-      end
-      opts.highlight.disable = disable_list
-
-      local indent_disable = {}
-      for _, v in ipairs(opts.indent.disable or {}) do
-        indent_disable[#indent_disable + 1] = v
-      end
-      if not vim.tbl_contains(indent_disable, 'latex') then
-        indent_disable[#indent_disable + 1] = 'latex'
-      end
-      opts.indent.disable = indent_disable
-
-      -- keep regex highlighting for LaTeX/BibTeX so you still get syntax
-      local add_regex = opts.highlight.additional_vim_regex_highlighting
-      if add_regex == nil then
-        add_regex = {}
-      end
-      if add_regex == true then
-        add_regex = {}
-      end
-      if type(add_regex) ~= 'table' then
-        add_regex = {}
-      end
-      if not vim.tbl_contains(add_regex, 'latex') then
-        add_regex[#add_regex + 1] = 'latex'
-      end
-      if not vim.tbl_contains(add_regex, 'bibtex') then
-        add_regex[#add_regex + 1] = 'bibtex'
-      end
-      opts.highlight.additional_vim_regex_highlighting = add_regex
-
-      return opts
     end,
   },
 }
