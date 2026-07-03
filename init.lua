@@ -835,7 +835,9 @@ require('lazy').setup({
         -- <c-k>: Toggle signature help
         --
         -- See :h blink-cmp-config-keymap for defining your own keymap
-        preset = 'default',
+        preset = 'enter', -- <CR> accepts the selected item
+        ['<Tab>'] = { 'select_next', 'snippet_forward', 'fallback' },
+        ['<S-Tab>'] = { 'select_prev', 'snippet_backward', 'fallback' },
 
         -- For more advanced Luasnip keymaps (e.g. selecting choice nodes, expansion) see:
         --    https://github.com/L3MON4D3/LuaSnip?tab=readme-ov-file#keymaps
@@ -941,6 +943,7 @@ require('lazy').setup({
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
     build = ':TSUpdate',
+    branch = 'master', -- Pin to the classic branch that kickstart's opts target (the `main` rewrite ignores these opts)
     main = 'nvim-treesitter.configs', -- Sets main module to use for opts
     -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
     opts = {

@@ -41,9 +41,10 @@ return {
             end, 200)
           end, 'LaTeX: Compile then forward search')
 
-          -- VimTeX omni completion + sane popup behavior
+          -- VimTeX omni completion. cmp-omni reads this buffer omnifunc and blink.compat
+          -- bridges the resulting 'omni' source into blink.cmp (see the blink spec below),
+          -- so \begin{…}, \alpha, \cite, \ref, etc. complete through blink.
           vim.bo[ev.buf].omnifunc = 'vimtex#complete#omnifunc'
-          vim.opt_local.completeopt = { 'menu', 'menuone', 'noinsert' }
 
           -- Stop auto-reindent on "}" (esp. in display math)
           do
@@ -55,46 +56,6 @@ return {
               end
             end
             vim.opt_local.indentkeys = filtered
-          end
-
-          -- nvim-cmp (per-buffer; trigger on <C-x> so it doesn't clash with Neo-tree)
-          local ok, cmp = pcall(require, 'cmp')
-          if ok then
-            local has_snip, luasnip = pcall(require, 'luasnip')
-            cmp.setup.buffer {
-              preselect = cmp.PreselectMode.Item,
-              mapping = cmp.mapping.preset.insert {
-                ['<C-x>'] = cmp.mapping.complete(),
-                ['<C-e>'] = cmp.mapping.abort(),
-                ['<CR>'] = cmp.mapping.confirm { select = true },
-                ['<Tab>'] = cmp.mapping(function(fb)
-                  if cmp.visible() then
-                    cmp.select_next_item()
-                  elseif has_snip and luasnip.expand_or_jumpable() then
-                    luasnip.expand_or_jump()
-                  else
-                    fb()
-                  end
-                end, { 'i', 's' }),
-                ['<S-Tab>'] = cmp.mapping(function(fb)
-                  if cmp.visible() then
-                    cmp.select_prev_item()
-                  elseif has_snip and luasnip.jumpable(-1) then
-                    luasnip.jump(-1)
-                  else
-                    fb()
-                  end
-                end, { 'i', 's' }),
-              },
-              sources = cmp.config.sources({
-                { name = 'nvim_lsp' },
-                { name = 'omni' }, -- \begin{…}, \alpha, \cite, \ref, etc.
-                { name = 'luasnip' },
-              }, {
-                { name = 'path' },
-                { name = 'buffer' },
-              }),
-            }
           end
 
           -- Insert-mode "}" mapping → auto-add \end{env}
@@ -167,7 +128,7 @@ return {
             }
             vim.keymap.set('i', '{', function()
               vim.schedule(function()
-                local ok2, cmp2 = pcall(require, 'cmp')
+                local ok2, blink = pcall(require, 'blink.cmp')
                 if not ok2 then
                   return
                 end
@@ -175,7 +136,7 @@ return {
                 local before = vim.api.nvim_get_current_line():sub(1, col0)
                 local cmd = before:match '\\([A-Za-z]+){$'
                 if cmd and (ref_like[cmd] or cite_like[cmd]) then
-                  cmp2.complete()
+                  blink.show()
                 end
               end)
               return '{'
@@ -252,8 +213,30 @@ return {
     end,
   },
 
-  -- Bridge VimTeX omni -> nvim-cmp
+  -- Bridge VimTeX's omnifunc (\ref, \cite, \begin{…}, \alpha, …) into blink.cmp.
+  -- cmp-omni registers an 'omni' source into nvim-cmp's registry (nvim-cmp is kept
+  -- installed purely as that registry/library — it is NOT set up as an active engine).
+  -- blink.compat then exposes that registered source to blink, our single completion UI.
   { 'hrsh7th/cmp-omni', ft = { 'tex', 'bib', 'markdown' }, dependencies = { 'hrsh7th/nvim-cmp' } },
+  { 'saghen/blink.compat', version = '*', lazy = true, opts = {} },
+  {
+    'saghen/blink.cmp',
+    dependencies = { 'saghen/blink.compat', 'hrsh7th/cmp-omni' },
+    opts = function(_, opts)
+      opts.sources = opts.sources or {}
+      opts.sources.providers = opts.sources.providers or {}
+      opts.sources.providers.omni = {
+        name = 'omni',
+        module = 'blink.compat.source',
+        score_offset = 100, -- prefer vimtex's \cite/\ref/\begin items in TeX
+      }
+      opts.sources.per_filetype = opts.sources.per_filetype or {}
+      for _, ft in ipairs { 'tex', 'bib', 'markdown' } do
+        opts.sources.per_filetype[ft] = { 'omni', 'lsp', 'path', 'snippets', 'buffer' }
+      end
+      return opts
+    end,
+  },
 
   -- Disable autopairs in TeX to avoid brace/regex conflicts
   {
@@ -329,6 +312,17 @@ return {
       opts = opts or {}
       opts.highlight = opts.highlight or {}
       opts.indent = opts.indent or {}
+
+      -- Never auto-install the latex/bibtex parsers: we use vim regex highlighting for
+      -- those filetypes, and the latex parser additionally requires the tree-sitter CLI
+      -- to build (which would error on `auto_install` when opening a .tex file).
+      local ignore = opts.ignore_install or {}
+      for _, ft in ipairs { 'latex', 'bibtex' } do
+        if not vim.tbl_contains(ignore, ft) then
+          ignore[#ignore + 1] = ft
+        end
+      end
+      opts.ignore_install = ignore
 
       -- disable TS highlighting/indent for latex & bibtex
       local disable_list = {}
